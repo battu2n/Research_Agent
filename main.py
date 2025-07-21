@@ -16,7 +16,7 @@ if pdf is not None:
         for page in doc:
             pdf_text += page.get_text()
 
-# 🚀 Run Agent
+#  Run Agent
 if st.button("Start Research") and topic:
     with st.spinner("Running the research agent..."):
         try:
@@ -29,7 +29,7 @@ if st.button("Start Research") and topic:
             st.subheader("Detailed Report")
             st.markdown(report.get("report", "No report available."))
 
-            #  Citations with "Show More"
+           
             st.subheader("Citations")
             citations = report.get("citations", [])
             show_all = st.checkbox(" Show all citations", value=False)
@@ -42,12 +42,12 @@ if st.button("Start Research") and topic:
                     st.markdown(f"- [{src}]({src})")
                 if len(citations) > 5:
                     st.caption(f"Showing 5 of {len(citations)} citations")
-            # Confidence Scores
+       
             st.subheader("Confidence Scores")
             for i, score in enumerate(report.get("confidence_scores", []), 1):
                 st.markdown(f"**Summary {i}** — Confidence: {score:.1f}%")
 
-            # ⬇️ Download Report
+        
             st.download_button(
                 "Download Full Report",
                 data=report.get("report", ""),
