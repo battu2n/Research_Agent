@@ -65,7 +65,9 @@ pip install -r requirements.txt
 
 ## 3. Add Your API Keys
 Create a .env file and add:
+
 TAVILY_API_KEY = "your_api_key"
+
 GROQ_API_KEY = "your_groq_key"
 
 ## 4. Run the Web App
