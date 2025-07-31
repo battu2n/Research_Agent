@@ -11,7 +11,9 @@ load_dotenv()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 MODEL = "llama-3.3-70b-versatile"
 
+
 # State Schema
+
 class ResearchState(TypedDict, total=False):
     topic: str
     subquestions: List[str]
@@ -21,21 +23,50 @@ class ResearchState(TypedDict, total=False):
     citations: List[str]
     pdf_text: str
     attempted_replanning: bool
-    confidence_scores: List[float]
+
+
+#Question Type Detector
+
+def detect_question_type(topic: str) -> str:
+    prompt = f"""
+    You are a research assistant. Classify the following research topic into ONE category:
+    - 'summary' (general research overview)
+    - 'comparison' (comparing 2+ items, technologies, companies)
+    - 'pros_cons' (analyze advantages and disadvantages)
+    - 'timeline' (chronological events)
+
+    Respond with ONLY the category name.
+
+    Topic: {topic}
+    """
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content.strip().lower()
+
 
 # Planner Node
+# 
 def planner_node(state: Dict) -> Dict:
     topic = state["topic"]
-    prompt = f" You are an intelligent research agent who have access to tavily search engine.Get the latest info about the research topic '{topic}' into 3-5 detailed sub-questions for research ang get accurate answers for them. Return the sub-questions in a list format, each starting with a hyphen."
+    prompt = (
+        f"You are an intelligent research agent with access to Tavily's real-time search engine. "
+        f"Generate 3-5 detailed, non-overlapping sub-questions that will help comprehensively research '{topic}'. "
+        f"Ensure they cover multiple perspectives and lead to accurate answers. "
+        f"Return the sub-questions as a bullet list, each starting with a hyphen (-)."
+    )
     response = client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content": prompt}]
     )
     questions = response.choices[0].message.content.split("\n")
     subquestions = [q.strip("- ").strip() for q in questions if q.strip()]
-    return {"topic": topic, "subquestions": subquestions}
+    return {"topic": topic, "subquestions": subquestions[:5]}
 
-# Tavily Web Search using API
+
+# Tavily Web Search
+
 def tavily_search(query: str) -> List[Dict]:
     api_key = os.getenv("TAVILY_API_KEY")
     url = "https://api.tavily.com/search"
@@ -47,7 +78,7 @@ def tavily_search(query: str) -> List[Dict]:
         "include_images": False,
         "max_results": 2
     }
-    response = requests.post(url, headers=headers, json=body)
+    response = requests.post(url, headers=headers, json=body, timeout=15)
     data = response.json()
     results = []
     for item in data.get("results", []):
@@ -59,7 +90,9 @@ def tavily_search(query: str) -> List[Dict]:
         })
     return results
 
-# Gatherer Node with Replanning
+
+# Gatherer Node
+
 def gatherer_node(state: Dict) -> Dict:
     findings = []
     citations = []
@@ -95,38 +128,56 @@ def gatherer_node(state: Dict) -> Dict:
         "attempted_replanning": state.get("attempted_replanning", False)
     }
 
-# Synthesizer Node (summarize + score)
+
+# Synthesizer Node 
+
 def synthesizer_node(state: Dict) -> Dict:
     topic = state["topic"]
     partial_summaries = []
-    confidence_scores = []
 
     pdf_context = state.get("pdf_text", "")
     if pdf_context:
-        partial_summaries.append(f"📎 Context from PDF:\n{pdf_context[:3000]}")
+        partial_summaries.append(f" Context from PDF:\n{pdf_context[:3000]}")
 
     for finding in state["findings"]:
         try:
             prompt = (
-                f"Summarize and rate confidence (0-100) in factual accuracy. "
-                f"Return as:\nSummary: <text>\nConfidence: <number>\n\nInput:\n{finding}"
+                f"You are a research assistant. Summarize the following finding briefly and provide a confidence score "
+                f"(0-100) based on factual accuracy and reliability of the information.\n\n"
+                f"Return in the format:\n<summary text> [XX%]\n\n"
+                f"Finding:\n{finding}"
             )
             response = client.chat.completions.create(
                 model=MODEL,
                 messages=[{"role": "user", "content": prompt}]
             )
-            content = response.choices[0].message.content
-            summary = content.split("Summary:")[1].split("Confidence:")[0].strip()
-            score = float(content.split("Confidence:")[1].strip())
-
-            partial_summaries.append(summary)
-            confidence_scores.append(score)
+            content = response.choices[0].message.content.strip()
+            partial_summaries.append(content)
         except Exception as e:
-            partial_summaries.append(f"[Error summarizing: {e}]")
-            confidence_scores.append(50.0)
+            partial_summaries.append(f"[Error summarizing finding: {e}] [50%]")
 
     combined = "\n\n".join(partial_summaries)[:6000]
-    final_prompt = f"Based on the following summaries and PDF context, provide a structured research report on '{topic}':\n\n{combined}"
+
+    # Dynamic final prompt based on question type
+    q_type = detect_question_type(topic)
+
+    if q_type == "comparison":
+        final_prompt = (
+            f"Compare the following findings on '{topic}' and present them in a well-structured table format with clear columns.\n\n{combined}"
+        )
+    elif q_type == "pros_cons":
+        final_prompt = (
+            f"Analyze the following findings on '{topic}' and present them as a Pros and Cons list with bullet points.\n\n{combined}"
+        )
+    elif q_type == "timeline":
+        final_prompt = (
+            f"Create a chronological timeline for '{topic}' with events, dates (if available), and explanations.\n\n{combined}"
+        )
+    else:
+        final_prompt = (
+            f"Provide a detailed and well-structured research report on '{topic}'. Use headings, subheadings, and bullet points if needed.\n\n{combined}"
+        )
+
     response = client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content": final_prompt}]
@@ -136,11 +187,12 @@ def synthesizer_node(state: Dict) -> Dict:
     return {
         "summary": full_summary,
         "report": full_summary,
-        "citations": state.get("citations", []),
-        "confidence_scores": confidence_scores
+        "citations": state.get("citations", [])
     }
 
-# Orchestrator with Progress Feedback
+
+# Orchestrator
+
 def run_research_agent(topic: str, pdf_text: str = "") -> Dict:
     builder = StateGraph(ResearchState)
     builder.add_node("Planner", planner_node)
@@ -159,22 +211,20 @@ def run_research_agent(topic: str, pdf_text: str = "") -> Dict:
     graph = builder.compile()
     state = {"topic": topic, "pdf_text": pdf_text[:6000]}
 
-    # Step-by-step execution with UI updates
     st.info("Planning research sub-questions...")
     planner_output = planner_node(state)
     st.success("✅ Planning complete.")
-    # st.write("**Sub-questions:**", planner_output["subquestions"])
 
     st.info("Gathering information via Tavily search...")
     gather_output = gatherer_node(planner_output)
     if gather_output.get("replan_needed"):
-        st.warning("⚠️ Not enough info. Replanning sub-questions...")
+        st.warning("⚠️ Not enough info. Replanning...")
         planner_output = planner_node(gather_output)
         gather_output = gatherer_node(planner_output)
     st.success("✅ Info gathering complete.")
     st.write(f"**{len(gather_output['findings'])} findings collected.**")
 
-    st.info("Summarizing findings and scoring confidence...")
+    st.info("Synthesizing results and generating final report...")
     synth_output = synthesizer_node(gather_output)
     st.success("✅ Summary and report generation complete.")
 
@@ -184,6 +234,5 @@ def run_research_agent(topic: str, pdf_text: str = "") -> Dict:
         "findings": gather_output["findings"],
         "citations": synth_output["citations"],
         "summary": synth_output["summary"],
-        "report": synth_output["report"],
-        "confidence_scores": synth_output["confidence_scores"]
+        "report": synth_output["report"]
     }
